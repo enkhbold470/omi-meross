@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Select Your Device</title>
+    <style>
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+            margin: 0; 
+            padding: 2rem; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        .container { 
+            max-width: 600px; 
+            margin: 0 auto; 
+            background: #ffffff; 
+            padding: 2rem; 
+            border-radius: 12px; 
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2); 
+        }
+        h1 { 
+            font-size: 1.75rem; 
+            margin-bottom: 0.5rem; 
+            color: #333;
+        }
+        .subtitle {
+            font-size: 0.9rem;
+            color: #666;
+            margin-bottom: 1.5rem;
+        }
+        .device-list {
+            margin-top: 1rem;
+        }
+        .device-item {
+            padding: 1rem;
+            margin-bottom: 0.75rem;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            text-decoration: none;
+            color: inherit;
+        }
+        .device-item:hover {
+            border-color: #667eea;
+            background: #f8f9ff;
+        }
+        .device-item.selected {
+            border-color: #667eea;
+            background: #f0f4ff;
+        }
+        .device-info {
+            flex: 1;
+        }
+        .device-name {
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 0.25rem;
+        }
+        .device-meta {
+            font-size: 0.85rem;
+            color: #666;
+        }
+        .device-status {
+            padding: 0.25rem 0.75rem;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        .device-status.online {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+        .device-status.offline {
+            background: #ffebee;
+            color: #d32f2f;
+        }
+        .device-actions {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 0.5rem;
+        }
+        .btn {
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            font-weight: 600;
+            transition: all 0.2s;
+            text-decoration: none;
+            display: inline-block;
+        }
+        .btn-on {
+            background: #4caf50;
+            color: white;
+        }
+        .btn-on:hover {
+            background: #45a049;
+        }
+        .btn-off {
+            background: #f44336;
+            color: white;
+        }
+        .btn-off:hover {
+            background: #da190b;
+        }
+        .error { 
+            color: #d32f2f; 
+            margin-top: 1rem; 
+            padding: 0.75rem;
+            background: #ffebee;
+            border-radius: 6px;
+            border-left: 4px solid #d32f2f;
+        }
+        .success {
+            color: #2e7d32;
+            margin-top: 1rem;
+            padding: 0.75rem;
+            background: #e8f5e9;
+            border-radius: 6px;
+            border-left: 4px solid #2e7d32;
+        }
+        .empty-state {
+            text-align: center;
+            padding: 2rem;
+            color: #666;
+        }
+        .loading {
+            text-align: center;
+            padding: 2rem;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Select Your Device</h1>
+        <p class="subtitle">Choose which Meross device you want to control</p>
+        
+        <div id="loading" class="loading">Loading devices...</div>
+        <div id="errorMessage" class="error" style="display: none;"></div>
+        <div id="successMessage" class="success" style="display: none;"></div>
+        
+        <div id="deviceList" class="device-list" style="display: none;"></div>
+    </div>
+
+    <script>
+        let selectedDeviceUuid = null;
+
+        // Load devices on page load
+        async function loadDevices() {
+            try {
+                const response = await fetch('/devices/list', {
+                    credentials: 'include'
+                });
+                
+                if (!response.ok) {
+                    if (response.status === 401) {
+                        window.location.href = '/login';
+                        return;
+                    }
+                    throw new Error('Failed to load devices');
+                }
+                
+                const data = await response.json();
+                displayDevices(data.devices);
+                
+                // Load selected device from cookie
+                const savedDevice = getCookie('meross_device_uuid');
+                if (savedDevice && data.devices.find(d => d.uuid === savedDevice)) {
+                    selectedDeviceUuid = savedDevice;
+                    highlightSelectedDevice();
+                }
+            } catch (error) {
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('errorMessage').textContent = `Error: ${error.message}. Please make sure you're logged in.`;
+                document.getElementById('errorMessage').style.display = 'block';
+            }
+        }
+
+        function displayDevices(devices) {
+            const loading = document.getElementById('loading');
+            const deviceList = document.getElementById('deviceList');
+            
+            loading.style.display = 'none';
+            
+            if (devices.length === 0) {
+                deviceList.innerHTML = '<div class="empty-state">No devices found. Make sure your Meross account has devices configured.</div>';
+                deviceList.style.display = 'block';
+                return;
+            }
+            
+            deviceList.innerHTML = devices.map(device => `
+                <div class="device-item" data-uuid="${device.uuid}" onclick="selectDevice('${device.uuid}', '${device.name.replace(/'/g, "\\'")}')">
+                    <div class="device-info">
+                        <div class="device-name">${device.name}</div>
+                        <div class="device-meta">${device.type} • ${device.uuid.substring(0, 8)}...</div>
+                        <div class="device-actions">
+                            <a href="/devices/${device.uuid}/on" class="btn btn-on" onclick="event.stopPropagation(); return controlDevice('${device.uuid}', 'on', event);">Turn On</a>
+                            <a href="/devices/${device.uuid}/off" class="btn btn-off" onclick="event.stopPropagation(); return controlDevice('${device.uuid}', 'off', event);">Turn Off</a>
+                        </div>
+                    </div>
+                    <span class="device-status ${device.online ? 'online' : 'offline'}">
+                        ${device.online ? '● Online' : '○ Offline'}
+                    </span>
+                </div>
+            `).join('');
+            
+            deviceList.style.display = 'block';
+        }
+
+        function getCookie(name) {
+            const value = `; ${document.cookie}`;
+            const parts = value.split(`; ${name}=`);
+            if (parts.length === 2) return parts.pop().split(';').shift();
+            return null;
+        }
+
+        function selectDevice(uuid, name) {
+            selectedDeviceUuid = uuid;
+            
+            // Save to cookie
+            const expiryDate = new Date();
+            expiryDate.setTime(expiryDate.getTime() + (365 * 24 * 60 * 60 * 1000));
+            document.cookie = `meross_device_uuid=${uuid}; expires=${expiryDate.toUTCString()}; path=/; SameSite=Lax`;
+            
+            highlightSelectedDevice();
+            
+            // Show success message
+            const successDiv = document.getElementById('successMessage');
+            successDiv.textContent = `✓ Selected: ${name}. You can now control this device via voice commands.`;
+            successDiv.style.display = 'block';
+            setTimeout(() => {
+                successDiv.style.display = 'none';
+            }, 3000);
+        }
+
+        function highlightSelectedDevice() {
+            document.querySelectorAll('.device-item').forEach(item => {
+                item.classList.remove('selected');
+                if (item.dataset.uuid === selectedDeviceUuid) {
+                    item.classList.add('selected');
+                }
+            });
+        }
+
+        async function controlDevice(uuid, action, event) {
+            event.preventDefault();
+            
+            const url = `/devices/${uuid}/${action}`;
+            const successDiv = document.getElementById('successMessage');
+            const errorDiv = document.getElementById('errorMessage');
+            
+            try {
+                const response = await fetch(url, {
+                    credentials: 'include'
+                });
+                const data = await response.json();
+                
+                if (response.ok) {
+                    successDiv.textContent = `✓ ${data.message}`;
+                    successDiv.style.display = 'block';
+                    errorDiv.style.display = 'none';
+                    setTimeout(() => {
+                        successDiv.style.display = 'none';
+                    }, 3000);
+                } else {
+                    errorDiv.textContent = `Error: ${data.detail || 'Failed to control device'}`;
+                    errorDiv.style.display = 'block';
+                    successDiv.style.display = 'none';
+                }
+            } catch (error) {
+                errorDiv.textContent = `Error: ${error.message}`;
+                errorDiv.style.display = 'block';
+                successDiv.style.display = 'none';
+            }
+            
+            return false;
+        }
+
+        // Load devices on page load
+        loadDevices();
+    </script>
+</body>
+</html>
+
