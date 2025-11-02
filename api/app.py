@@ -1,6 +1,6 @@
 import asyncio
 import os
-from flask import Flask, jsonify
+from flask import Flask, jsonify, render_template, request, redirect, url_for
 import logging
 from dotenv import load_dotenv
 load_dotenv()
@@ -16,8 +16,16 @@ PASSWORD = os.environ.get("MEROSS_PASSWORD")
 
 app = Flask(__name__)
 
+
+def credentials_configured():
+    """Return True when Meross credentials are ready to use."""
+    return bool(EMAIL and PASSWORD)
+
 async def get_device():
     """Get the device for each request"""
+    if not credentials_configured():
+        raise Exception("Meross credentials not configured. Visit /login to set them.")
+
     http_api_client = await MerossHttpClient.async_from_user_password(
         email=EMAIL, password=PASSWORD, api_base_url="https://iot.meross.com")
     
@@ -70,9 +78,36 @@ async def turn_off_light():
     finally:
         await cleanup(manager, http_api_client)
 
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """Collect Meross credentials from the user."""
+    global EMAIL, PASSWORD
+
+    if request.method == 'POST':
+        email = (request.form.get('email') or '').strip()
+        password = (request.form.get('password') or '').strip()
+
+        if not email or not password:
+            return render_template('login.html', error="Email and password are required.", email=email)
+
+        EMAIL = email
+        PASSWORD = password
+        logger.debug("Meross credentials set via login page for email %s", EMAIL)
+        logger.info("Meross credentials configured via login page.")
+        return redirect(url_for('home'))
+
+    if credentials_configured():
+        return redirect(url_for('home'))
+
+    return render_template('login.html', error=None, email=EMAIL or '')
+
 @app.route('/on', methods=['GET'])
 def light_on():
     """Turn light on"""
+    if not credentials_configured():
+        return jsonify({"status": "error", "message": "Please log in at /login to configure Meross credentials."}), 401
+
     try:
         success, message = run_async(turn_on_light())
         return jsonify({"status": "success", "message": message}), 200
@@ -83,6 +118,9 @@ def light_on():
 @app.route('/off', methods=['GET'])
 def light_off():
     """Turn light off"""
+    if not credentials_configured():
+        return jsonify({"status": "error", "message": "Please log in at /login to configure Meross credentials."}), 401
+
     try:
         success, message = run_async(turn_off_light())
         return jsonify({"status": "success", "message": message}), 200
@@ -93,18 +131,21 @@ def light_off():
 @app.route('/', methods=['GET'])
 def home():
     """Home page"""
+    if not credentials_configured():
+        return redirect(url_for('login'))
+
     return jsonify({
         "message": "Simple Light Controller",
         "endpoints": {
             "GET /on": "Turn light on",
             "GET /off": "Turn light off"
-        }
+        },
+        "credentialsConfigured": credentials_configured()
     }), 200
 
 if __name__ == '__main__':
-    if not EMAIL or not PASSWORD:
-        logger.error("Please set MEROSS_EMAIL and MEROSS_PASSWORD environment variables")
-        exit(1)
+    if not credentials_configured():
+        logger.warning("MEROSS_EMAIL and MEROSS_PASSWORD not set; visit /login to configure them before toggling devices.")
     
     flask_env = os.environ.get('FLASK_ENV', 'development')
     if flask_env == 'production':
