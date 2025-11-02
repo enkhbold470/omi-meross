@@ -783,21 +783,21 @@ async def api_login(
 
 
 @router.post("/webhook", response_model=OMIWebhookResponse)
-async def omi_webhook(request: OMIWebhookRequest):
+async def omi_webhook(webhook_request: OMIWebhookRequest, request: Request):
     """
     OMI webhook endpoint for receiving real-time transcripts.
     
     Processes speech transcripts from OMI device, infers device control intents,
     and executes Meross device actions when appropriate.
     """
-    logger.info(f"Received OMI webhook request for session_id: {request.session_id}, uid: {request.uid}")
-    logger.debug(f"Received data: {request.dict()}")
+    logger.info(f"Received OMI webhook request for session_id: {webhook_request.session_id}, uid: {webhook_request.uid}")
+    logger.debug(f"Received data: {webhook_request.dict()}")
     
-    if not request.session_id:
+    if not webhook_request.session_id:
         raise HTTPException(status_code=400, detail="No session_id provided")
     
     # Get user ID (use uid from request or fallback to session_id)
-    uid = request.uid or request.session_id
+    uid = webhook_request.uid or webhook_request.session_id
     logger.debug(f"Processing request for uid: {uid}")
     
     # Get user credentials from cookies (if available) or server storage
@@ -818,7 +818,7 @@ async def omi_webhook(request: OMIWebhookRequest):
         device_uuid = None
     
     # Extract transcript from segments
-    transcript = extract_text_from_segments(request.segments)
+    transcript = extract_text_from_segments(webhook_request.segments)
     
     if not transcript:
         logger.debug("No transcript text found in segments")
