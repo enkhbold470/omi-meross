@@ -19,6 +19,8 @@ from meross_iot.http_api import MerossHttpClient
 from meross_iot.manager import MerossManager
 from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
+import redis
+from redis.exceptions import RedisError
 
 load_dotenv()
 
@@ -73,14 +75,61 @@ templates = Jinja2Templates(directory=str(template_dir))
 # Track startup time
 start_time = time.time()
 
-# Thread-safe user credential storage
+# Initialize Redis connection for persistent credential storage
+_redis_client = None
+_redis_enabled = False
+
+def get_redis_client():
+    """Get or create Redis client."""
+    global _redis_client, _redis_enabled
+    if _redis_client is not None:
+        return _redis_client
+    
+    redis_url = os.environ.get("REDIS_URL")
+    if not redis_url:
+        logger.warning("REDIS_URL not configured, falling back to in-memory storage (credentials won't persist across serverless invocations)")
+        return None
+    
+    try:
+        # Parse Redis URL (supports redis://, rediss://, redis://password@host:port formats)
+        _redis_client = redis.from_url(redis_url, decode_responses=True)
+        # Test connection
+        _redis_client.ping()
+        _redis_enabled = True
+        logger.info("Redis connection established for persistent credential storage")
+        return _redis_client
+    except Exception as e:
+        logger.error(f"Failed to connect to Redis: {e}. Falling back to in-memory storage")
+        _redis_enabled = False
+        return None
+
+# Initialize Redis client on module load
+get_redis_client()
+
+# Fallback: Thread-safe in-memory user credential storage (if Redis not available)
 # Format: {uid: {"email": str, "password": str}}
 _user_credentials: Dict[str, Dict[str, str]] = {}
 _credentials_lock = threading.Lock()
 
 
 def get_user_credentials(uid: str) -> Optional[Tuple[str, str]]:
-    """Get credentials for a specific user."""
+    """Get credentials for a specific user from Redis or in-memory storage."""
+    redis_client = get_redis_client()
+    
+    # Try Redis first
+    if redis_client and _redis_enabled:
+        try:
+            email = redis_client.get(f"meross:credentials:{uid}:email")
+            password = redis_client.get(f"meross:credentials:{uid}:password")
+            if email and password:
+                logger.debug(f"Retrieved credentials from Redis for uid: {uid}")
+                return email, password
+        except RedisError as e:
+            logger.warning(f"Redis error retrieving credentials: {e}, falling back to in-memory")
+        except Exception as e:
+            logger.error(f"Unexpected error retrieving from Redis: {e}")
+    
+    # Fallback to in-memory storage
     with _credentials_lock:
         creds = _user_credentials.get(uid)
         if creds:
@@ -89,14 +138,46 @@ def get_user_credentials(uid: str) -> Optional[Tuple[str, str]]:
 
 
 def set_user_credentials(uid: str, email: str, password: str):
-    """Store credentials for a specific user."""
+    """Store credentials for a specific user in Redis or in-memory storage."""
+    redis_client = get_redis_client()
+    
+    # Try Redis first
+    if redis_client and _redis_enabled:
+        try:
+            # Store with 365 days expiration (same as cookies)
+            expiry_seconds = 365 * 24 * 60 * 60
+            redis_client.setex(f"meross:credentials:{uid}:email", expiry_seconds, email)
+            redis_client.setex(f"meross:credentials:{uid}:password", expiry_seconds, password)
+            logger.info(f"Stored credentials in Redis for user {uid} (expires in 365 days)")
+            return
+        except RedisError as e:
+            logger.warning(f"Redis error storing credentials: {e}, falling back to in-memory")
+        except Exception as e:
+            logger.error(f"Unexpected error storing in Redis: {e}")
+    
+    # Fallback to in-memory storage
     with _credentials_lock:
         _user_credentials[uid] = {"email": email, "password": password}
-    logger.info(f"Stored credentials for user {uid}")
+    logger.info(f"Stored credentials in-memory for user {uid} (temporary, won't persist)")
 
 
 def has_user_credentials(uid: str) -> bool:
-    """Check if user has credentials configured."""
+    """Check if user has credentials configured in Redis or in-memory storage."""
+    redis_client = get_redis_client()
+    
+    # Try Redis first
+    if redis_client and _redis_enabled:
+        try:
+            email = redis_client.get(f"meross:credentials:{uid}:email")
+            password = redis_client.get(f"meross:credentials:{uid}:password")
+            if email and password:
+                return True
+        except RedisError as e:
+            logger.warning(f"Redis error checking credentials: {e}, falling back to in-memory")
+        except Exception as e:
+            logger.error(f"Unexpected error checking Redis: {e}")
+    
+    # Fallback to in-memory storage
     with _credentials_lock:
         return uid in _user_credentials and bool(_user_credentials[uid].get("email") and _user_credentials[uid].get("password"))
 
@@ -172,7 +253,6 @@ def credentials_configured(email: Optional[str] = None, password: Optional[str] 
     ready = bool(email and password)
     logger.debug(f"credentials_configured -> {ready}")
     return ready
-
 
 async def get_all_devices(email: str, password: str):
     """Get all devices from Meross account."""
@@ -683,11 +763,9 @@ async def login(
         manager, http_api_client, devices = await get_all_devices(email, password)
         await cleanup(manager, http_api_client)
         
-        # Store credentials for this user
-        # Note: In serverless (Vercel), this is temporary storage that doesn't persist
-        # Credentials should be accessed via cookies or passed in webhook request
+        # Store credentials for this user in Redis (persists across serverless invocations)
         set_user_credentials(uid, email, password)
-        logger.info(f"Stored credentials for uid {uid} via login form (will persist in this instance only)")
+        logger.info(f"Stored credentials for uid {uid} via login form (persisted in Redis)")
         
         # Create response with success message
         response = templates.TemplateResponse(
@@ -786,8 +864,7 @@ async def api_login(
             secure=False  # Set to True in production with HTTPS
         )
         
-        # Also store in server-side storage for webhook (if uid available)
-        # Note: In serverless, this is temporary - credentials should be passed via webhook or cookies
+        # Also store in Redis for webhook (if uid available) - persists across serverless invocations
         if uid:
             set_user_credentials(uid, credentials.email, credentials.password)
             response.set_cookie(
@@ -798,7 +875,7 @@ async def api_login(
                 samesite="lax",
                 secure=False
             )
-            logger.info(f"Stored credentials for uid {uid} (will persist in this instance only)")
+            logger.info(f"Stored credentials for uid {uid} in Redis (persists across invocations)")
         
         return response
     except Exception as e:
