@@ -1,4 +1,3 @@
-import asyncio
 import io
 import json
 import os
@@ -12,7 +11,7 @@ from typing import Dict, Optional, Tuple, List, Any
 from dotenv import load_dotenv
 
 from fastapi import APIRouter, Request, HTTPException, File, UploadFile, Form, Header, FastAPI, Cookie
-from fastapi.responses import JSONResponse, HTMLResponse, Response, RedirectResponse
+from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -144,12 +143,6 @@ class VoiceCommandResponse(BaseModel):
     audioFilePath: Optional[str] = None
 
 
-class StatusResponse(BaseModel):
-    message: str
-    endpoints: Dict[str, str]
-    credentialsConfigured: bool
-
-
 class DeviceInfo(BaseModel):
     uuid: str
     name: str
@@ -161,17 +154,6 @@ class DeviceListResponse(BaseModel):
     status: str
     devices: List[DeviceInfo]
     count: int
-
-
-class DeviceSelectionRequest(BaseModel):
-    device_uuid: str
-
-
-class DeviceSelectionResponse(BaseModel):
-    status: str
-    message: str
-    device_uuid: Optional[str] = None
-    device_name: Optional[str] = None
 
 
 class CredentialsRequest(BaseModel):
@@ -707,7 +689,8 @@ async def login(
         set_user_credentials(uid, email, password)
         logger.info(f"Stored credentials for uid {uid} via login form (will persist in this instance only)")
         
-        return templates.TemplateResponse(
+        # Create response with success message
+        response = templates.TemplateResponse(
             "login.html",
             {
                 "request": request,
@@ -717,6 +700,38 @@ async def login(
                 "success": True
             }
         )
+        
+        # Also set cookies so credentials persist across serverless invocations
+        # These cookies will be sent with subsequent requests from the same browser
+        from datetime import timedelta
+        expiry = timedelta(days=365)
+        response.set_cookie(
+            key="meross_email",
+            value=email,
+            max_age=int(expiry.total_seconds()),
+            httponly=True,
+            samesite="lax",
+            secure=False  # Set to True in production with HTTPS
+        )
+        response.set_cookie(
+            key="meross_password",
+            value=password,
+            max_age=int(expiry.total_seconds()),
+            httponly=True,
+            samesite="lax",
+            secure=False  # Set to True in production with HTTPS
+        )
+        response.set_cookie(
+            key="meross_uid",
+            value=uid,
+            max_age=int(expiry.total_seconds()),
+            httponly=True,
+            samesite="lax",
+            secure=False
+        )
+        logger.info(f"Set cookies for uid {uid} - credentials will persist via cookies")
+        
+        return response
     except Exception as e:
         logger.error(f"Error validating credentials: {e}")
         return templates.TemplateResponse(
@@ -805,9 +820,12 @@ async def omi_webhook(webhook_request: OMIWebhookRequest, request: Request):
     if not webhook_request.session_id:
         raise HTTPException(status_code=400, detail="No session_id provided")
     
-    # Get user ID (use uid from request or fallback to session_id)
-    uid = webhook_request.uid or webhook_request.session_id
-    logger.debug(f"Processing request for uid: {uid}")
+    # Get user ID (check multiple sources in order):
+    # 1. uid from webhook request body
+    # 2. uid from query parameters (webhook URL: /webhook?uid=...)
+    # 3. session_id as fallback
+    uid = webhook_request.uid or request.query_params.get("uid") or webhook_request.session_id
+    logger.debug(f"Processing request for uid: {uid} (from body: {webhook_request.uid}, from query: {request.query_params.get('uid')}, from session_id: {webhook_request.session_id})")
     
     # Get user credentials - try multiple sources (in order of preference):
     # 1. Credentials in webhook request body (for serverless environments)
