@@ -1,0 +1,508 @@
+{
+  "tools": [
+    {
+      "name": "Task",
+      "description": "GPT-5 Codex: Dispatches a Codex-powered agent for advanced multi-step coding or research tasks. Specify 'agent_type' as one of: 'general-gpt5', 'statusline-codex', or 'outputstyle-codex'. Each agent accesses GPT-5 Codex APIs for internal tool orchestration, code search, reasoning, and editing. Example use cases: deep refactors, open-ended codebase exploration, automated review and documentation. For targeted file reads or simple searches, use specialized tools directly for efficiency. Provide a clear task description and required output.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "Brief (3-5 words) summary of the Codex agent task"
+          },
+          "prompt": {
+            "type": "string",
+            "description": "Detailed instructions for the agent (code, research, etc)"
+          },
+          "agent_type": {
+            "type": "string",
+            "description": "Which GPT-5 Codex agent to run"
+          }
+        },
+        "required": [
+          "description",
+          "prompt",
+          "agent_type"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "Bash",
+      "description": "GPT-5 Codex: Securely executes Bash commands using Codex supervision in a persistent shell. Quoted paths are required for spaces. Avoid 'find', 'grep', 'cat', etc.—prefer Codex-powered Grep/Read/Glob. Specify an optional 'timeout' (ms, max 600000) or 'run_in_background'. Always include a concise, Codex-style 5-10 word description of the command.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "The shell command to execute (Codex audited)"
+          },
+          "timeout": {
+            "type": "number",
+            "description": "Optional timeout in ms (default: 120000, max:600000)"
+          },
+          "description": {
+            "type": "string",
+            "description": "Codex: 5-10 word description of this Bash command"
+          },
+          "run_in_background": {
+            "type": "boolean",
+            "description": "Run this Bash command in the background."
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "Glob",
+      "description": "GPT-5 Codex: Uses Codex API for fast file pattern searching. Supports '**/*.ext' and directory-limited queries. Returns results sorted by last-modified. Use for quick filename-based lookup; for complex cross-file search, delegate to Codex Task instead.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Glob pattern for Codex search (e.g. '**/*.py')"
+          },
+          "path": {
+            "type": "string",
+            "description": "Directory to search. Omit for project root (Codex autodetects)."
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "Grep",
+      "description": "GPT-5 Codex: High-performance full-regex code/content search via Codex. Supports ripgrep-style patterns, file filters, output modes (content, file list, count), and multiline (dotall) matching. Codex recommends using this for code search; never shell out to 'grep' directly.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Regex or string for Codex-enabled grep"
+          },
+          "path": {
+            "type": "string",
+            "description": "File or directory (Codex-absolute or root-relative)"
+          },
+          "glob": {
+            "type": "string",
+            "description": "File glob filter (e.g. '*.ts')"
+          },
+          "output_mode": {
+            "type": "string",
+            "enum": [
+              "content",
+              "files_with_matches",
+              "count"
+            ],
+            "description": "Grep result format (lines, paths, or match counts)"
+          },
+          "-B": {
+            "type": "number",
+            "description": "Lines before each Codex match (content mode only)"
+          },
+          "-A": {
+            "type": "number",
+            "description": "Lines after each Codex match (content mode only)"
+          },
+          "-C": {
+            "type": "number",
+            "description": "Lines before and after each match (content mode only)"
+          },
+          "-n": {
+            "type": "boolean",
+            "description": "Line numbers in result (content mode only)"
+          },
+          "-i": {
+            "type": "boolean",
+            "description": "Case-insensitive Codex search"
+          },
+          "type": {
+            "type": "string",
+            "description": "Filetype limiter ('py','js','tsx', etc, Codex accelerated)"
+          },
+          "head_limit": {
+            "type": "number",
+            "description": "Limit output entries (lines/paths/count), Codex-optimized"
+          },
+          "multiline": {
+            "type": "boolean",
+            "description": "Enable dotall multi-line (Codex supports cross-line search)"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "LS",
+      "description": "GPT-5 Codex: Directory listing. Requires Codex-validated absolute path. Use for baseline file/folder enumeration. Prefer Codex's Glob/Grep for nontrivial searches.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Codex-audited absolute directory path"
+          },
+          "ignore": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Codex file globs to ignore"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "ExitPlanMode",
+      "description": "GPT-5 Codex: Use when ending a formal plan phase and ready to proceed with implementation. Only trigger when concrete steps for a code-writing task are approved. Do not use for pure research or exploration stages.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "plan": {
+            "type": "string",
+            "description": "Codex summary of the approved implementation plan (markdown supported)"
+          }
+        },
+        "required": [
+          "plan"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "Read",
+      "description": "GPT-5 Codex: Reads file contents, images, PDFs, notebooks using Codex's internal read API. Use an absolute path. By default, Codex reads the first 2000 lines. Optionally specify line offset/limit for large files. Results use 'cat -n' line formatting. Images and PDFs returned as visual or extracted content for Codex analysis.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "Codex-audited absolute filepath"
+          },
+          "offset": {
+            "type": "number",
+            "description": "Line to start (for large files, Codex optimized)"
+          },
+          "limit": {
+            "type": "number",
+            "description": "Number of lines to read (optional, Codex-guarded)"
+          }
+        },
+        "required": [
+          "file_path"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "Edit",
+      "description": "GPT-5 Codex: Precise file editing. Requires a prior Read. Codex matches exact strings (indentation preserved, no line number prefix). Fails if 'old_string' is not unique unless 'replace_all' is set. Use for atomic, explainable source modifications. Input absolute 'file_path', 'old_string', 'new_string' (different values), and optional 'replace_all'. No emoji output.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "Codex absolute file path to modify"
+          },
+          "old_string": {
+            "type": "string",
+            "description": "Exact string to replace (from Codex read, no prefix)"
+          },
+          "new_string": {
+            "type": "string",
+            "description": "Replacement string (Codex will verify difference)"
+          },
+          "replace_all": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true to replace every occurrence (Codex checked)."
+          }
+        },
+        "required": [
+          "file_path",
+          "old_string",
+          "new_string"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "MultiEdit",
+      "description": "GPT-5 Codex: Makes multiple edits to a file transactionally. Each edit uses the same rules as Edit. All or none apply—Codex validates the full sequence. 'edits' is an array: {old_string, new_string, [replace_all]}. For large changes, Codex recommends ordering to avoid overlap issues.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "Codex absolute path for edits"
+          },
+          "edits": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "old_string": {
+                  "type": "string",
+                  "description": "Exact string to replace"
+                },
+                "new_string": {
+                  "type": "string",
+                  "description": "Replacement string"
+                },
+                "replace_all": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "If true, replace all matching occurrences"
+                }
+              },
+              "required": [
+                "old_string",
+                "new_string"
+              ],
+              "additionalProperties": false
+            },
+            "minItems": 1,
+            "description": "Array of Codex file edit operations (applied in order)"
+          }
+        },
+        "required": [
+          "file_path",
+          "edits"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "Write",
+      "description": "GPT-5 Codex: Overwrites or creates files safely. Requires prior Read if overwriting. Use absolute file paths. Only create new files if clearly intended. No unsolicited documentation/emoji. (For single-line edits, prefer Edit/MultiEdit.)",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "Absolute (Codex-audited) file path to write"
+          },
+          "content": {
+            "type": "string",
+            "description": "Codex-verified content for this file"
+          }
+        },
+        "required": [
+          "file_path",
+          "content"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "NotebookEdit",
+      "description": "GPT-5 Codex: Efficiently edit or insert Jupyter notebook (.ipynb) cells. 'notebook_path' is absolute; use 'cell_id' for granular control. 'edit_mode' supports 'replace', 'insert', or 'delete'. Specify 'new_source' for new/edited content and 'cell_type' if adding (code/markdown).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "notebook_path": {
+            "type": "string",
+            "description": "Codex-audited absolute notebook path"
+          },
+          "cell_id": {
+            "type": "string",
+            "description": "Unique id of cell to modify/insert after (optional for top insert)"
+          },
+          "new_source": {
+            "type": "string",
+            "description": "New source for cell content"
+          },
+          "cell_type": {
+            "type": "string",
+            "enum": [
+              "code",
+              "markdown"
+            ],
+            "description": "If inserting, specify code or markdown"
+          },
+          "edit_mode": {
+            "type": "string",
+            "enum": [
+              "replace",
+              "insert",
+              "delete"
+            ],
+            "description": "Notebook cell edit type"
+          }
+        },
+        "required": [
+          "notebook_path",
+          "new_source"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "WebFetch",
+      "description": "GPT-5 Codex: Fetches content from a URL and extracts relevant information using Codex's LLM-powered browser pipeline. Accepts valid HTTPS URLs. Attach a prompt describing what Codex should analyze in the retrieved content. Redirections and caching are handled by Codex logic.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "URL to fetch (Codex fetches/normalizes/validates)"
+          },
+          "prompt": {
+            "type": "string",
+            "description": "What should Codex extract/answer about this URL?"
+          }
+        },
+        "required": [
+          "url",
+          "prompt"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "TodoWrite",
+      "description": "GPT-5 Codex: Maintain structured actionable TODO lists for complex/multi-step tasks. Use only for tasks requiring 3+ steps or explicit user request. Each TODO must have text content, status ('pending', 'in_progress', 'completed'), and unique id. Codex tracks status atomically.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "todos": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "content": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "pending",
+                    "in_progress",
+                    "completed"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content",
+                "status",
+                "id"
+              ],
+              "additionalProperties": false
+            },
+            "description": "Codex-formatted array of todo items (each with id/status)"
+          }
+        },
+        "required": [
+          "todos"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "WebSearch",
+      "description": "GPT-5 Codex: Real-time web search using Codex-updated world knowledge. Returns formatted search results. Use for up-to-date coding, documentation, and event data. Supports 'allowed_domains', 'blocked_domains'. US-only.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 2,
+            "description": "String for Codex real-time web search"
+          },
+          "allowed_domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Restrict search to these Codex domains"
+          },
+          "blocked_domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Exclude results from these Codex domains"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "BashOutput",
+      "description": "GPT-5 Codex: Retrieve output of a running/completed Codex-managed Bash session. Provide 'bash_id'. Optionally filter with regex. Codex returns only new output (stdout/stderr/state) since last check.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "bash_id": {
+            "type": "string",
+            "description": "Codex session id for background Bash shell"
+          },
+          "filter": {
+            "type": "string",
+            "description": "Optional regex: filter new Codex shell output lines"
+          }
+        },
+        "required": [
+          "bash_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "KillBash",
+      "description": "GPT-5 Codex: Terminate a Codex-managed background Bash shell by id. Use /bashes to enumerate running Codex shells.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "shell_id": {
+            "type": "string",
+            "description": "Shell id (as returned by Codex-managed shells)"
+          }
+        },
+        "required": [
+          "shell_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    }
+  ]
+}
