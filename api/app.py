@@ -859,7 +859,14 @@ async def omi_webhook(webhook_request: OMIWebhookRequest, request: Request):
             error_msg = "Error connecting to your Meross account. Please check your credentials."
             return OMIWebhookResponse(status="success", message=error_msg)
     
-    # Infer intent from transcript
+    # Check credentials before processing intent
+    if not has_creds:
+        # Skip intent inference if credentials are missing
+        setup_message = f"Please configure your Meross credentials first. Visit /login?uid={uid}"
+        logger.info(f"No credentials configured for uid {uid}, skipping intent processing")
+        return OMIWebhookResponse(status="success", message=setup_message)
+    
+    # Infer intent from transcript (only if credentials are available)
     try:
         intent = infer_intent_from_transcript(transcript)
     except ValueError as err:
@@ -877,31 +884,28 @@ async def omi_webhook(webhook_request: OMIWebhookRequest, request: Request):
     response_message = intent.get("assistant_message", "")
     
     if intent.get("action") in {"turn_on", "turn_off"}:
-        if not has_creds:
-            response_message = f"Please configure your Meross credentials first. Visit /login?uid={uid}"
-        else:
-            try:
-                # Only use device_uuid from cookie if no device name is specified in intent
-                # Otherwise, let perform_device_action find the device by name
-                intent_device_name = intent.get("device", "").strip()
-                use_cookie_device = device_uuid and not intent_device_name
-                
-                success, device_message = await perform_device_action(
-                    intent_device_name if intent_device_name else None,
-                    intent["action"],
-                    email,
-                    password,
-                    device_uuid if use_cookie_device else None
-                )
-                if success:
-                    response_message = device_message
-                else:
-                    response_message = device_message or response_message
-            except Exception as err:
-                logger.error(f"Error executing device action: {err}")
-                response_message = "I had trouble controlling the device. Please check your credentials and try again."
+        try:
+            # Only use device_uuid from cookie if no device name is specified in intent
+            # Otherwise, let perform_device_action find the device by name
+            intent_device_name = intent.get("device", "").strip()
+            use_cookie_device = device_uuid and not intent_device_name
+            
+            success, device_message = await perform_device_action(
+                intent_device_name if intent_device_name else None,
+                intent["action"],
+                email,
+                password,
+                device_uuid if use_cookie_device else None
+            )
+            if success:
+                response_message = device_message
+            else:
+                response_message = device_message or response_message
+        except Exception as err:
+            logger.error(f"Error executing device action: {err}")
+            response_message = "I had trouble controlling the device. Please check your credentials and try again."
     
-    # Add follow-up if present
+    # Add follow-up if present (only after successful processing)
     if intent.get("follow_up"):
         response_message = f"{response_message} {intent.get('follow_up')}"
     
