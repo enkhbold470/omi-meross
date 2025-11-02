@@ -120,6 +120,10 @@ class OMIWebhookRequest(BaseModel):
     session_id: str
     segments: List[OMISegment] = []
     uid: Optional[str] = None
+    # Optional: Allow credentials to be passed in webhook for serverless environments
+    meross_email: Optional[str] = None
+    meross_password: Optional[str] = None
+    meross_device_uuid: Optional[str] = None
 
 
 class OMIWebhookResponse(BaseModel):
@@ -698,7 +702,10 @@ async def login(
         await cleanup(manager, http_api_client)
         
         # Store credentials for this user
+        # Note: In serverless (Vercel), this is temporary storage that doesn't persist
+        # Credentials should be accessed via cookies or passed in webhook request
         set_user_credentials(uid, email, password)
+        logger.info(f"Stored credentials for uid {uid} via login form (will persist in this instance only)")
         
         return templates.TemplateResponse(
             "login.html",
@@ -765,6 +772,7 @@ async def api_login(
         )
         
         # Also store in server-side storage for webhook (if uid available)
+        # Note: In serverless, this is temporary - credentials should be passed via webhook or cookies
         if uid:
             set_user_credentials(uid, credentials.email, credentials.password)
             response.set_cookie(
@@ -775,6 +783,7 @@ async def api_login(
                 samesite="lax",
                 secure=False
             )
+            logger.info(f"Stored credentials for uid {uid} (will persist in this instance only)")
         
         return response
     except Exception as e:
@@ -791,7 +800,7 @@ async def omi_webhook(webhook_request: OMIWebhookRequest, request: Request):
     and executes Meross device actions when appropriate.
     """
     logger.info(f"Received OMI webhook request for session_id: {webhook_request.session_id}, uid: {webhook_request.uid}")
-    logger.debug(f"Received data: {webhook_request.dict()}")
+    logger.debug(f"Received data: {webhook_request.dict(exclude={'meross_password'})}")  # Don't log password
     
     if not webhook_request.session_id:
         raise HTTPException(status_code=400, detail="No session_id provided")
@@ -800,22 +809,39 @@ async def omi_webhook(webhook_request: OMIWebhookRequest, request: Request):
     uid = webhook_request.uid or webhook_request.session_id
     logger.debug(f"Processing request for uid: {uid}")
     
-    # Get user credentials from cookies (if available) or server storage
-    meross_email = request.cookies.get("meross_email")
-    meross_password = request.cookies.get("meross_password")
-    meross_device_uuid = request.cookies.get("meross_device_uuid")
+    # Get user credentials - try multiple sources (in order of preference):
+    # 1. Credentials in webhook request body (for serverless environments)
+    # 2. Cookies (if webhook sends them)
+    # 3. Server-side storage (in-memory, doesn't persist in serverless)
     
-    # Try cookies first, then fallback to server storage
-    if meross_email and meross_password:
-        email, password = meross_email, meross_password
-        has_creds = True
-        device_uuid = meross_device_uuid
+    email = None
+    password = None
+    device_uuid = None
+    
+    # First, try credentials from webhook request body (best for serverless)
+    if webhook_request.meross_email and webhook_request.meross_password:
+        email = webhook_request.meross_email
+        password = webhook_request.meross_password
+        device_uuid = webhook_request.meross_device_uuid
+        logger.info(f"Using credentials from webhook request body for uid: {uid}")
+    
+    # Second, try cookies (if available)
+    elif request.cookies.get("meross_email") and request.cookies.get("meross_password"):
+        email = request.cookies.get("meross_email")
+        password = request.cookies.get("meross_password")
+        device_uuid = request.cookies.get("meross_device_uuid")
+        logger.info(f"Using credentials from cookies for uid: {uid}")
+    
+    # Third, try server-side storage (won't work in serverless but try anyway)
     else:
-        # Fallback to server-side storage
         user_creds = get_user_credentials(uid)
-        email, password = user_creds if user_creds else (None, None)
-        has_creds = has_user_credentials(uid)
-        device_uuid = None
+        if user_creds:
+            email, password = user_creds
+            logger.info(f"Using credentials from server storage for uid: {uid}")
+        else:
+            logger.warning(f"No credentials found for uid: {uid} (checked webhook body, cookies, and server storage)")
+    
+    has_creds = bool(email and password)
     
     # Extract transcript from segments
     transcript = extract_text_from_segments(webhook_request.segments)
@@ -862,8 +888,13 @@ async def omi_webhook(webhook_request: OMIWebhookRequest, request: Request):
     # Check credentials before processing intent
     if not has_creds:
         # Skip intent inference if credentials are missing
-        setup_message = f"Please configure your Meross credentials first. Visit /login?uid={uid}"
-        logger.info(f"No credentials configured for uid {uid}, skipping intent processing")
+        setup_message = (
+            f"Please configure your Meross credentials. "
+            f"Visit https://omi-meross.vercel.app/login?uid={uid} to set up your account. "
+            f"After logging in, the credentials will be stored and the webhook will work. "
+            f"Note: In serverless environments, credentials need to be set up in the same session or passed in the webhook request."
+        )
+        logger.warning(f"No credentials found for uid {uid} - user needs to configure at /login?uid={uid}")
         return OMIWebhookResponse(status="success", message=setup_message)
     
     # Infer intent from transcript (only if credentials are available)
@@ -918,13 +949,70 @@ async def omi_webhook(webhook_request: OMIWebhookRequest, request: Request):
 
 
 @router.get("/webhook/setup-status")
-async def webhook_setup_status():
-    """Check if webhook setup is complete."""
+async def webhook_setup_status(
+    uid: Optional[str] = None,
+    request: Optional[Request] = None
+):
+    """Check if webhook setup is complete for a given uid."""
     try:
-        return {"is_setup_completed": True}
+        if not uid:
+            # Try to get from query params or cookies
+            if request:
+                uid = request.query_params.get("uid") or request.cookies.get("meross_uid")
+        
+        if uid:
+            # Check if credentials exist
+            has_creds = False
+            # Check cookies
+            if request and request.cookies.get("meross_email") and request.cookies.get("meross_password"):
+                has_creds = True
+            # Check server storage
+            elif has_user_credentials(uid):
+                has_creds = True
+            
+            return {
+                "is_setup_completed": has_creds,
+                "uid": uid,
+                "message": "Credentials configured" if has_creds else f"No credentials found. Visit /login?uid={uid}"
+            }
+        else:
+            return {"is_setup_completed": False, "message": "No uid provided"}
     except Exception as e:
         logger.error(f"Error checking setup status: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/webhook/store-credentials")
+async def store_webhook_credentials(
+    request: Request,
+    uid: str = Form(...),
+    email: str = Form(...),
+    password: str = Form(...),
+    device_uuid: Optional[str] = Form(None)
+):
+    """
+    Store credentials for webhook use.
+    This endpoint allows storing credentials that can be retrieved by webhook via uid.
+    Note: In serverless, this uses in-memory storage which may not persist.
+    For production, consider using a database or external storage.
+    """
+    try:
+        # Validate credentials by trying to connect
+        manager, http_api_client, devices = await get_all_devices(email, password)
+        await cleanup(manager, http_api_client)
+        
+        # Store credentials
+        set_user_credentials(uid, email, password)
+        
+        logger.info(f"Stored credentials for webhook uid: {uid}")
+        return JSONResponse({
+            "status": "success",
+            "message": "Credentials stored successfully",
+            "uid": uid
+        })
+    except Exception as e:
+        logger.error(f"Error storing credentials: {e}")
+        raise HTTPException(status_code=400, detail=f"Failed to validate or store credentials: {str(e)}")
 
 
 @router.get("/devices/{device_uuid}/on", response_model=LightControlResponse)
