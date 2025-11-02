@@ -2,85 +2,163 @@ import asyncio
 import io
 import json
 import os
-from typing import Dict, Optional, Tuple
-from flask import Flask, jsonify, render_template, request, redirect, url_for
+import time
 import logging
+import wave
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, Optional, Tuple, List, Any
 from dotenv import load_dotenv
-load_dotenv()
+
+from fastapi import APIRouter, Request, HTTPException, File, UploadFile, Form, Header, FastAPI
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from meross_iot.http_api import MerossHttpClient
 from meross_iot.manager import MerossManager
 from openai import OpenAI
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Environment variables
 EMAIL = os.environ.get("MEROSS_EMAIL")
 PASSWORD = os.environ.get("MEROSS_PASSWORD")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-_openai_client: Optional[OpenAI] = None
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY environment variable is required")
 
-app = Flask(__name__)
+print(f"API key loaded (last 4 chars): ...{OPENAI_API_KEY[-4:]}")
+
+# Initialize OpenAI client
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+# Set up proxy if needed
+if os.getenv('HTTPS_PROXY'):
+    os.environ['OPENAI_PROXY'] = os.getenv('HTTPS_PROXY')
+
+# Audio storage directory
+AUDIO_STORAGE_DIR = Path(os.environ.get("OMI_AUDIO_DIR", Path.cwd() / "voice_audio")).resolve()
+try:
+    AUDIO_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Audio storage directory ready at {AUDIO_STORAGE_DIR}")
+except Exception as exc:
+    logger.error(f"Failed to prepare audio storage directory {AUDIO_STORAGE_DIR}: {exc}")
+
+# Create router
+router = APIRouter(tags=["meross-device"])
+
+# Track startup time
+start_time = time.time()
 
 
-def credentials_configured():
+# Pydantic models
+class OMISegment(BaseModel):
+    id: str
+    text: str
+    speaker: str
+    speaker_id: int
+    is_user: bool
+    person_id: Optional[str] = None
+    start: float
+    end: float
+    translations: List[str] = []
+    speech_profile_processed: bool = False
+
+
+class OMIWebhookRequest(BaseModel):
+    session_id: str
+    segments: List[OMISegment] = []
+    uid: Optional[str] = None
+
+
+class OMIWebhookResponse(BaseModel):
+    status: str = "success"
+    message: Optional[str] = None
+
+
+class LightControlResponse(BaseModel):
+    status: str
+    message: str
+
+
+class VoiceCommandResponse(BaseModel):
+    status: str
+    transcript: Optional[str] = None
+    intent: Optional[Dict[str, str]] = None
+    deviceAction: Optional[Dict[str, Any]] = None
+    audioFilePath: Optional[str] = None
+
+
+class StatusResponse(BaseModel):
+    message: str
+    endpoints: Dict[str, str]
+    credentialsConfigured: bool
+
+
+class CredentialsRequest(BaseModel):
+    email: str
+    password: str
+
+
+class CredentialsResponse(BaseModel):
+    status: str
+    message: str
+
+
+# Helper functions
+def credentials_configured() -> bool:
     """Return True when Meross credentials are ready to use."""
-    return bool(EMAIL and PASSWORD)
+    ready = bool(EMAIL and PASSWORD)
+    logger.debug(f"credentials_configured -> {ready}")
+    return ready
 
-
-def get_openai_client() -> OpenAI:
-    """Initialise and return a reusable OpenAI client."""
-    global _openai_client
-
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY not configured. Set it before using voice commands.")
-
-    if _openai_client is None:
-        _openai_client = OpenAI(api_key=OPENAI_API_KEY)
-
-    return _openai_client
 
 async def get_device():
     """Get the device for each request"""
     if not credentials_configured():
-        raise Exception("Meross credentials not configured. Visit /login to set them.")
+        raise HTTPException(
+            status_code=401,
+            detail="Meross credentials not configured. Set MEROSS_EMAIL and MEROSS_PASSWORD environment variables."
+        )
 
+    logger.debug("Creating Meross HTTP client")
     http_api_client = await MerossHttpClient.async_from_user_password(
-        email=EMAIL, password=PASSWORD, api_base_url="https://iot.meross.com")
+        email=EMAIL, password=PASSWORD, api_base_url="https://iot.meross.com"
+    )
     
     manager = MerossManager(http_client=http_api_client)
     await manager.async_init()
     
+    logger.debug("Running Meross device discovery")
     await manager.async_device_discovery()
     plugs = manager.find_devices(device_type="mss110")
     
     if len(plugs) < 1:
-        raise Exception("No mss110 plugs found")
-    
+        raise HTTPException(status_code=404, detail="No mss110 plugs found")
+
     device = plugs[0]
+    logger.debug(f"Selected device {device.uuid} ({device.name})")
     await device.async_update()
     
     return manager, http_api_client, device
 
+
 async def cleanup(manager, http_api_client):
     """Clean up connections"""
-    manager.close()
-    await http_api_client.async_logout()
-
-def run_async(coro):
-    """Helper to run async code"""
-    if os.name == 'nt':
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+        manager.close()
+        await http_api_client.async_logout()
+    except Exception as e:
+        logger.error(f"Error during cleanup: {e}")
 
-async def turn_on_light():
+
+async def turn_on_light() -> Tuple[bool, str]:
     """Turn on the light"""
     manager, http_api_client, device = await get_device()
     try:
@@ -89,7 +167,8 @@ async def turn_on_light():
     finally:
         await cleanup(manager, http_api_client)
 
-async def turn_off_light():
+
+async def turn_off_light() -> Tuple[bool, str]:
     """Turn off the light"""
     manager, http_api_client, device = await get_device()
     try:
@@ -99,49 +178,55 @@ async def turn_off_light():
         await cleanup(manager, http_api_client)
 
 
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    """Collect Meross credentials from the user."""
-    global EMAIL, PASSWORD
+def save_audio_debug_file(audio_bytes: bytes, filename_hint: str, sample_rate: int) -> Path:
+    """Persist audio bytes as WAV for debugging and return the saved path."""
+    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    safe_name = Path(filename_hint).stem or "omi-audio"
+    destination = AUDIO_STORAGE_DIR / f"{timestamp}_{safe_name}.wav"
 
-    if request.method == 'POST':
-        email = (request.form.get('email') or '').strip()
-        password = (request.form.get('password') or '').strip()
+    try:
+        with wave.open(destination, 'wb') as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(audio_bytes)
+        logger.debug(f"Saved audio payload to {destination}")
+    except Exception as exc:
+        logger.error(f"Failed to save WAV file {destination}: {exc}")
+        # Fallback: dump raw bytes for inspection
+        raw_destination = destination.with_suffix('.raw')
+        raw_destination.write_bytes(audio_bytes)
+        logger.debug(f"Saved raw audio payload to {raw_destination}")
+        return raw_destination
 
-        if not email or not password:
-            return render_template('login.html', error="Email and password are required.", email=email)
-
-        EMAIL = email
-        PASSWORD = password
-        logger.debug("Meross credentials set via login page for email %s", EMAIL)
-        logger.info("Meross credentials configured via login page.")
-        return redirect(url_for('home'))
-
-    if credentials_configured():
-        return redirect(url_for('home'))
-
-    return render_template('login.html', error=None, email=EMAIL or '')
+    return destination
 
 
-def transcribe_audio_file(file_storage) -> str:
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+def transcribe_audio_payload(audio_bytes: bytes, filename: str = "omi-audio.wav") -> str:
     """Run Whisper transcription on uploaded audio."""
-    client = get_openai_client()
-
-    audio_bytes = file_storage.read()
     if not audio_bytes:
+        logger.error("Uploaded audio payload empty")
         raise ValueError("Audio file is empty.")
 
+    logger.debug(f"Received audio payload {filename} with {len(audio_bytes)} bytes")
     audio_stream = io.BytesIO(audio_bytes)
-    audio_stream.name = file_storage.filename or "omi-audio.wav"
+    audio_stream.name = filename or "omi-audio.wav"
     audio_stream.seek(0)
 
-    transcription = client.audio.transcriptions.create(
-        model="whisper-1",
-        file=audio_stream,
-        response_format="text"
-    )
-
-    return transcription.strip()
+    logger.debug("Sending audio to Whisper")
+    try:
+        transcription = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=audio_stream,
+            response_format="text"
+        )
+        text = transcription.strip()
+        logger.debug(f"Whisper transcript: {text}")
+        return text
+    except Exception as e:
+        logger.error(f"Error transcribing audio: {e}")
+        raise
 
 
 INTENT_PROMPT = (
@@ -154,59 +239,70 @@ INTENT_PROMPT = (
 )
 
 
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
 def infer_intent_from_transcript(transcript: str) -> Dict[str, str]:
     """Use GPT to convert transcript into a structured intent."""
-    client = get_openai_client()
-    response = client.responses.create(
-        model="gpt-4o-mini",
-        input=[
-            {
-                "role": "system",
-                "content": [{"type": "text", "text": INTENT_PROMPT}],
-            },
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": transcript}],
-            },
-        ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "omi_intent",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "action": {
-                            "type": "string",
-                            "enum": ["turn_on", "turn_off", "none"],
-                        },
-                        "device": {
-                            "type": "string",
-                            "description": "Target device name."
-                        },
-                        "assistant_message": {
-                            "type": "string",
-                            "description": "What the assistant says back to the user."
-                        },
-                        "follow_up": {
-                            "type": "string",
-                            "description": "Optional follow-up, may be empty."
-                        }
-                    },
-                    "required": ["action", "device", "assistant_message", "follow_up"],
-                    "additionalProperties": False
-                }
-            }
-        }
-    )
-
+    logger.debug(f"Sending transcript to GPT intent model: {transcript}")
     try:
-        payload = json.loads(response.output_text)
-    except json.JSONDecodeError as exc:
-        logger.error("Failed to parse intent JSON: %s", exc)
-        raise ValueError("Intent parsing failed") from exc
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": INTENT_PROMPT,
+                },
+                {
+                    "role": "user",
+                    "content": transcript,
+                },
+            ],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "omi_intent",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["turn_on", "turn_off", "none"],
+                            },
+                            "device": {
+                                "type": "string",
+                                "description": "Target device name."
+                            },
+                            "assistant_message": {
+                                "type": "string",
+                                "description": "What the assistant says back to the user."
+                            },
+                            "follow_up": {
+                                "type": "string",
+                                "description": "Optional follow-up, may be empty."
+                            }
+                        },
+                        "required": ["action", "device", "assistant_message", "follow_up"],
+                        "additionalProperties": False
+                    }
+                }
+            },
+            temperature=0.7,
+            timeout=30,
+        )
 
-    return payload
+        # Parse the JSON response
+        content = response.choices[0].message.content
+        if not content:
+            raise ValueError("Empty response from OpenAI")
+        
+        payload = json.loads(content)
+        logger.debug(f"Parsed intent payload: {payload}")
+        return payload
+    except json.JSONDecodeError as exc:
+        logger.error(f"Failed to parse intent JSON: {exc}")
+        raise ValueError("Intent parsing failed") from exc
+    except Exception as e:
+        logger.error(f"Error inferring intent: {e}")
+        raise
 
 
 DEVICE_KEYWORDS = {
@@ -221,23 +317,29 @@ DEVICE_KEYWORDS = {
 def resolve_device_name(raw_name: str) -> Optional[str]:
     """Map free-text device name to a supported device label."""
     name = (raw_name or "").lower()
+    logger.debug(f"Resolving device name from '{raw_name}'")
     for keyword, canonical in DEVICE_KEYWORDS.items():
         if keyword in name:
+            logger.debug(f"Device resolved to {canonical}")
             return canonical
+    logger.debug("No matching device found")
     return None
 
 
-def perform_device_action(device_name: str, action: str) -> Tuple[bool, str]:
+async def perform_device_action(device_name: str, action: str) -> Tuple[bool, str]:
     """Execute the requested Meross action if supported."""
     canonical = resolve_device_name(device_name)
     if canonical is None:
         return False, f"I don't recognise the device '{device_name}'."
 
     if action == "turn_on":
-        success, message = run_async(turn_on_light())
+        logger.debug(f"Performing turn_on for {canonical}")
+        success, message = await turn_on_light()
     elif action == "turn_off":
-        success, message = run_async(turn_off_light())
+        logger.debug(f"Performing turn_off for {canonical}")
+        success, message = await turn_off_light()
     else:
+        logger.debug("Unsupported action requested")
         return False, "No action executed."
 
     if canonical == "coffee machine" and success:
@@ -251,58 +353,202 @@ def perform_device_action(device_name: str, action: str) -> Tuple[bool, str]:
 
     return success, message
 
-@app.route('/on', methods=['GET'])
-def light_on():
-    """Turn light on"""
-    if not credentials_configured():
-        return jsonify({"status": "error", "message": "Please log in at /login to configure Meross credentials."}), 401
 
-    try:
-        success, message = run_async(turn_on_light())
-        return jsonify({"status": "success", "message": message}), 200
-    except Exception as e:
-        logger.error(f"Error turning on light: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@app.route('/off', methods=['GET'])
-def light_off():
-    """Turn light off"""
-    if not credentials_configured():
-        return jsonify({"status": "error", "message": "Please log in at /login to configure Meross credentials."}), 401
-
-    try:
-        success, message = run_async(turn_off_light())
-        return jsonify({"status": "success", "message": message}), 200
-    except Exception as e:
-        logger.error(f"Error turning off light: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+def extract_text_from_segments(segments: List[OMISegment]) -> str:
+    """Extract and combine text from OMI segments."""
+    if not segments:
+        return ""
+    
+    # Filter to user segments only and combine text
+    user_segments = [seg.text for seg in segments if seg.is_user]
+    return " ".join(user_segments).strip()
 
 
-@app.route('/voice', methods=['POST'])
-def handle_voice_command():
-    """Process voice input: transcribe, infer intent, execute device action."""
-    if 'audio' not in request.files:
-        return jsonify({"status": "error", "message": "Upload audio as form-data with field 'audio'."}), 400
-
-    audio_file = request.files['audio']
-
-    try:
-        transcript = transcribe_audio_file(audio_file)
-    except RuntimeError as err:
-        logger.error("Voice command failed, configuration missing: %s", err)
-        return jsonify({"status": "error", "message": str(err)}), 500
-    except Exception as err:
-        logger.error("Unable to transcribe audio: %s", err)
-        return jsonify({"status": "error", "message": "Transcription failed."}), 500
-
+# API Routes
+@router.post("/webhook", response_model=OMIWebhookResponse)
+async def omi_webhook(request: OMIWebhookRequest):
+    """
+    OMI webhook endpoint for receiving real-time transcripts.
+    
+    Processes speech transcripts from OMI device, infers device control intents,
+    and executes Meross device actions when appropriate.
+    """
+    logger.info(f"Received OMI webhook request for session_id: {request.session_id}")
+    logger.debug(f"Received data: {request.dict()}")
+    
+    if not request.session_id:
+        raise HTTPException(status_code=400, detail="No session_id provided")
+    
+    # Extract transcript from segments
+    transcript = extract_text_from_segments(request.segments)
+    
+    if not transcript:
+        logger.debug("No transcript text found in segments")
+        return OMIWebhookResponse(status="success", message=None)
+    
+    logger.info(f"Processing transcript: '{transcript}'")
+    
+    # Infer intent from transcript
     try:
         intent = infer_intent_from_transcript(transcript)
-    except RuntimeError as err:
-        logger.error("OpenAI configuration error: %s", err)
-        return jsonify({"status": "error", "message": str(err)}), 500
+    except ValueError as err:
+        logger.error(f"OpenAI configuration error: {err}")
+        return OMIWebhookResponse(
+            status="success",
+            message="I'm having trouble understanding your request right now."
+        )
     except Exception as err:
-        logger.error("Intent inference failed: %s", err)
-        return jsonify({"status": "error", "message": "Intent analysis failed."}), 500
+        logger.error(f"Intent inference failed: {err}")
+        return OMIWebhookResponse(
+            status="success",
+            message="I couldn't analyze that request. Please try again."
+        )
+    
+    logger.debug(f"Intent result: {intent}")
+    
+    # Execute device action if applicable
+    response_message = intent.get("assistant_message", "")
+    
+    if intent.get("action") in {"turn_on", "turn_off"} and credentials_configured():
+        try:
+            success, device_message = await perform_device_action(
+                intent.get("device", ""), intent["action"]
+            )
+            if success:
+                response_message = device_message
+            else:
+                response_message = device_message or response_message
+        except Exception as err:
+            logger.error(f"Error executing device action: {err}")
+            response_message = "I had trouble controlling the device. Please try again."
+    elif intent.get("action") in {"turn_on", "turn_off"} and not credentials_configured():
+        response_message = "Meross credentials are not configured. Please set MEROSS_EMAIL and MEROSS_PASSWORD environment variables."
+    
+    # Add follow-up if present
+    if intent.get("follow_up"):
+        response_message = f"{response_message} {intent.get('follow_up')}"
+    
+    logger.info(f"Responding with: {response_message}")
+    
+    return OMIWebhookResponse(
+        status="success",
+        message=response_message
+    )
+
+
+@router.get("/webhook/setup-status")
+async def webhook_setup_status():
+    """Check if webhook setup is complete."""
+    try:
+        return {"is_setup_completed": True}
+    except Exception as e:
+        logger.error(f"Error checking setup status: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/on", response_model=LightControlResponse)
+async def light_on():
+    """Turn light on"""
+    if not credentials_configured():
+        raise HTTPException(
+            status_code=401,
+            detail="Please set MEROSS_EMAIL and MEROSS_PASSWORD environment variables to configure Meross credentials."
+        )
+
+    try:
+        success, message = await turn_on_light()
+        if success:
+            return LightControlResponse(status="success", message=message)
+        else:
+            raise HTTPException(status_code=500, detail=message)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error turning on light: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/off", response_model=LightControlResponse)
+async def light_off():
+    """Turn light off"""
+    if not credentials_configured():
+        raise HTTPException(
+            status_code=401,
+            detail="Please set MEROSS_EMAIL and MEROSS_PASSWORD environment variables to configure Meross credentials."
+        )
+
+    try:
+        success, message = await turn_off_light()
+        if success:
+            return LightControlResponse(status="success", message=message)
+        else:
+            raise HTTPException(status_code=500, detail=message)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error turning off light: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/voice", response_model=VoiceCommandResponse)
+async def handle_voice_command(
+    request: Request,
+    audio: Optional[UploadFile] = File(None),
+    x_audio_filename: Optional[str] = Header(None, alias="X-Audio-Filename"),
+    x_audio_sample_rate: Optional[str] = Header(None, alias="X-Audio-Sample-Rate"),
+):
+    """Process voice input: transcribe, infer intent, execute device action."""
+    audio_bytes: bytes = b""
+    filename = "omi-audio.wav"
+
+    # Check for multipart file upload
+    if audio:
+        filename = audio.filename or filename
+        audio_bytes = await audio.read()
+        logger.debug(f"/voice received multipart file field 'audio' -> {filename}")
+    else:
+        # Try to read raw body
+        try:
+            audio_bytes = await request.body()
+            filename = x_audio_filename or filename
+            logger.debug(f"/voice received raw body audio -> {filename}")
+        except Exception as e:
+            logger.error(f"Error reading request body: {e}")
+
+    if not audio_bytes:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide audio via multipart 'audio' field or raw body."
+        )
+
+    # Get sample rate
+    sample_rate = x_audio_sample_rate or request.query_params.get('sample_rate', '16000')
+    try:
+        sample_rate_int = int(sample_rate)
+    except (TypeError, ValueError):
+        sample_rate_int = 16000
+
+    saved_path = save_audio_debug_file(audio_bytes, filename, sample_rate_int)
+
+    # Transcribe audio
+    try:
+        transcript = transcribe_audio_payload(audio_bytes, filename)
+    except ValueError as err:
+        logger.error(f"Voice command failed, configuration missing: {err}")
+        raise HTTPException(status_code=500, detail=str(err))
+    except Exception as err:
+        logger.error(f"Unable to transcribe audio: {err}")
+        raise HTTPException(status_code=500, detail="Transcription failed.")
+
+    # Infer intent
+    try:
+        intent = infer_intent_from_transcript(transcript)
+    except ValueError as err:
+        logger.error(f"OpenAI configuration error: {err}")
+        raise HTTPException(status_code=500, detail=str(err))
+    except Exception as err:
+        logger.error(f"Intent inference failed: {err}")
+        raise HTTPException(status_code=500, detail="Intent analysis failed.")
 
     action_result: Dict[str, Optional[str]] = {
         "executed": False,
@@ -310,47 +556,74 @@ def handle_voice_command():
         "message": None,
     }
 
+    logger.debug(f"Intent result: {intent}")
     if intent.get("action") in {"turn_on", "turn_off"} and credentials_configured():
         try:
-            success, device_message = perform_device_action(intent.get("device", ""), intent["action"])
+            success, device_message = await perform_device_action(
+                intent.get("device", ""), intent["action"]
+            )
             action_result["executed"] = success
             action_result["message"] = device_message
         except Exception as err:
-            logger.error("Error executing device action: %s", err)
+            logger.error(f"Error executing device action: {err}")
             action_result["message"] = "Device action failed."
     elif intent.get("action") in {"turn_on", "turn_off"} and not credentials_configured():
-        action_result["message"] = "Meross credentials missing. Configure them at /login."
+        action_result["message"] = "Meross credentials missing. Set MEROSS_EMAIL and MEROSS_PASSWORD environment variables."
 
-    return jsonify({
-        "status": "success",
-        "transcript": transcript,
-        "intent": intent,
-        "deviceAction": action_result,
-    }), 200
+    return VoiceCommandResponse(
+        status="success",
+        transcript=transcript,
+        intent=intent,
+        deviceAction=action_result,
+        audioFilePath=str(saved_path),
+    )
 
-@app.route('/', methods=['GET'])
-def home():
+
+@router.get("/", response_model=StatusResponse)
+async def home():
     """Home page"""
-    if not credentials_configured():
-        return redirect(url_for('login'))
-
-    return jsonify({
-        "message": "Simple Light Controller",
-        "endpoints": {
+    return StatusResponse(
+        message="OMI Meross Device Controller",
+        endpoints={
             "GET /on": "Turn light on",
             "GET /off": "Turn light off",
-            "POST /voice": "Transcribe audio and control devices"
+            "POST /voice": "Transcribe audio and control devices",
+            "POST /webhook": "OMI webhook endpoint for real-time transcripts"
         },
-        "credentialsConfigured": credentials_configured()
-    }), 200
+        credentialsConfigured=credentials_configured()
+    )
 
-if __name__ == '__main__':
-    if not credentials_configured():
-        logger.warning("MEROSS_EMAIL and MEROSS_PASSWORD not set; visit /login to configure them before toggling devices.")
-    
-    flask_env = os.environ.get('FLASK_ENV', 'development')
-    if flask_env == 'production':
-        from waitress import serve
-        serve(app, host='0.0.0.0', port=5000)
-    else:
-        app.run(host='0.0.0.0', port=5000, debug=True)
+
+@router.get("/status")
+async def status():
+    """Get service status"""
+    return {
+        "active": True,
+        "uptime": time.time() - start_time,
+        "credentials_configured": credentials_configured()
+    }
+
+
+# Create FastAPI app instance
+app = FastAPI(
+    title="OMI Meross Device Controller",
+    description="Smart home device controller for Meross devices",
+    version="1.0.0"
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure appropriately for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include router
+app.include_router(router)
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 5000))
+    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=True)

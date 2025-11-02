@@ -1,3 +1,5 @@
 venv/
 .venv/
 .env
+api/__pycache__/
+voice_audio/
