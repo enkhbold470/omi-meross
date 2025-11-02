@@ -949,22 +949,18 @@ async def omi_webhook(webhook_request: OMIWebhookRequest, request: Request):
 
 
 @router.get("/webhook/setup-status")
-async def webhook_setup_status(
-    uid: Optional[str] = None,
-    request: Optional[Request] = None
-):
+async def webhook_setup_status(request: Request, uid: Optional[str] = None):
     """Check if webhook setup is complete for a given uid."""
     try:
         if not uid:
             # Try to get from query params or cookies
-            if request:
-                uid = request.query_params.get("uid") or request.cookies.get("meross_uid")
+            uid = request.query_params.get("uid") or request.cookies.get("meross_uid")
         
         if uid:
             # Check if credentials exist
             has_creds = False
             # Check cookies
-            if request and request.cookies.get("meross_email") and request.cookies.get("meross_password"):
+            if request.cookies.get("meross_email") and request.cookies.get("meross_password"):
                 has_creds = True
             # Check server storage
             elif has_user_credentials(uid):
