@@ -1,7 +1,18 @@
-
 {
-    "rewrites": [
-      { "source": "/(.*)", "destination": "/api/app.py" }
-    ]
+  "builds": [
+    {
+      "src": "api/index.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "api/index.py"
+    }
+  ],
+  "env": {
+    "PYTHON_VERSION": "3.11"
   }
-  
+}
+

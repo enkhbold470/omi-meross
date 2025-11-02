@@ -178,11 +178,31 @@ async def turn_off_light() -> Tuple[bool, str]:
         await cleanup(manager, http_api_client)
 
 
-def save_audio_debug_file(audio_bytes: bytes, filename_hint: str, sample_rate: int) -> Path:
-    """Persist audio bytes as WAV for debugging and return the saved path."""
+def save_audio_debug_file(audio_bytes: bytes, filename_hint: str, sample_rate: int) -> Optional[Path]:
+    """
+    Persist audio bytes as WAV for debugging and return the saved path.
+    On serverless platforms, saves to /tmp directory if available.
+    Returns None if file saving is not available.
+    """
+    # On serverless (Vercel), use /tmp directory which is writable
+    # On local/dev, use configured directory
+    if os.path.exists("/tmp") and os.access("/tmp", os.W_OK):
+        storage_dir = Path("/tmp")
+    elif AUDIO_STORAGE_DIR.exists() and AUDIO_STORAGE_DIR.is_dir():
+        storage_dir = AUDIO_STORAGE_DIR
+    else:
+        # Try to create the directory
+        try:
+            AUDIO_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+            storage_dir = AUDIO_STORAGE_DIR
+        except Exception:
+            # If we can't create directory, skip file saving (serverless)
+            logger.debug("Cannot save audio file - no writable directory available")
+            return None
+    
     timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     safe_name = Path(filename_hint).stem or "omi-audio"
-    destination = AUDIO_STORAGE_DIR / f"{timestamp}_{safe_name}.wav"
+    destination = storage_dir / f"{timestamp}_{safe_name}.wav"
 
     try:
         with wave.open(destination, 'wb') as wav_file:
@@ -191,15 +211,18 @@ def save_audio_debug_file(audio_bytes: bytes, filename_hint: str, sample_rate: i
             wav_file.setframerate(sample_rate)
             wav_file.writeframes(audio_bytes)
         logger.debug(f"Saved audio payload to {destination}")
+        return destination
     except Exception as exc:
         logger.error(f"Failed to save WAV file {destination}: {exc}")
-        # Fallback: dump raw bytes for inspection
-        raw_destination = destination.with_suffix('.raw')
-        raw_destination.write_bytes(audio_bytes)
-        logger.debug(f"Saved raw audio payload to {raw_destination}")
-        return raw_destination
-
-    return destination
+        # Try fallback: dump raw bytes
+        try:
+            raw_destination = destination.with_suffix('.raw')
+            raw_destination.write_bytes(audio_bytes)
+            logger.debug(f"Saved raw audio payload to {raw_destination}")
+            return raw_destination
+        except Exception:
+            logger.debug("Cannot save audio file - filesystem error")
+            return None
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
@@ -575,7 +598,7 @@ async def handle_voice_command(
         transcript=transcript,
         intent=intent,
         deviceAction=action_result,
-        audioFilePath=str(saved_path),
+        audioFilePath=str(saved_path) if saved_path else None,
     )
 
 
