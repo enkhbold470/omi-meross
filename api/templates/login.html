@@ -3,34 +3,254 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Configure Meross Credentials</title>
+    <title>Connect Your Meross Account</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 0; padding: 2rem; background: #f5f5f5; }
-        .container { max-width: 400px; margin: 0 auto; background: #ffffff; padding: 2rem; border-radius: 8px; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1); }
-        h1 { font-size: 1.5rem; margin-bottom: 1rem; }
-        label { display: block; margin-top: 1rem; }
-        input { width: 100%; padding: 0.5rem; margin-top: 0.25rem; border: 1px solid #cccccc; border-radius: 4px; }
-        .error { color: #b00020; margin-top: 1rem; }
-        button { margin-top: 1.5rem; width: 100%; padding: 0.75rem; background: #007bff; color: #ffffff; border: none; border-radius: 4px; cursor: pointer; }
-        button:hover { background: #0056b3; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+            margin: 0; 
+            padding: 2rem; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        .container { 
+            max-width: 400px; 
+            margin: 0 auto; 
+            background: #ffffff; 
+            padding: 2rem; 
+            border-radius: 12px; 
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2); 
+        }
+        h1 { 
+            font-size: 1.75rem; 
+            margin-bottom: 0.5rem; 
+            color: #333;
+        }
+        .subtitle {
+            font-size: 0.9rem;
+            color: #666;
+            margin-bottom: 1.5rem;
+        }
+        label { 
+            display: block; 
+            margin-top: 1rem; 
+            font-weight: 500;
+            color: #333;
+        }
+        input { 
+            width: 100%; 
+            padding: 0.75rem; 
+            margin-top: 0.5rem; 
+            border: 2px solid #e0e0e0; 
+            border-radius: 6px; 
+            font-size: 1rem;
+            box-sizing: border-box;
+        }
+        input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        .uid-info {
+            font-size: 0.85rem;
+            color: #666;
+            margin-top: 0.5rem;
+            padding: 0.75rem;
+            background: #f5f5f5;
+            border-radius: 4px;
+            margin-bottom: 1rem;
+        }
+        .error { 
+            color: #d32f2f; 
+            margin-top: 1rem; 
+            padding: 0.75rem;
+            background: #ffebee;
+            border-radius: 6px;
+            border-left: 4px solid #d32f2f;
+            display: none;
+        }
+        .error.show {
+            display: block;
+        }
+        .success {
+            color: #2e7d32;
+            margin-top: 1rem;
+            padding: 0.75rem;
+            background: #e8f5e9;
+            border-radius: 6px;
+            border-left: 4px solid #2e7d32;
+            display: none;
+        }
+        .success.show {
+            display: block;
+        }
+        button { 
+            margin-top: 1.5rem; 
+            width: 100%; 
+            padding: 0.875rem; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #ffffff; 
+            border: none; 
+            border-radius: 6px; 
+            cursor: pointer; 
+            font-size: 1rem;
+            font-weight: 600;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        button:hover { 
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+        button:active {
+            transform: translateY(0);
+        }
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        .info-box {
+            font-size: 0.85rem;
+            color: #666;
+            padding: 0.75rem;
+            background: #f0f4ff;
+            border-radius: 6px;
+            margin-top: 1rem;
+            border-left: 4px solid #667eea;
+        }
+        .loading {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #ffffff;
+            border-radius: 50%;
+            border-top-color: transparent;
+            animation: spin 0.8s linear infinite;
+            margin-right: 0.5rem;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Meross Login</h1>
-        <form method="post">
+        <h1>Connect Your Meross Account</h1>
+        <p class="subtitle">Enter your Meross account credentials to control your smart devices</p>
+        
+        <form id="loginForm">
+            <div id="uidInfo" class="uid-info" style="display: none;"></div>
+            
             <label for="email">Meross Email</label>
-            <input id="email" name="email" type="email" required value="{{ email }}">
+            <input id="email" name="email" type="email" required placeholder="your.email@example.com">
 
             <label for="password">Meross Password</label>
-            <input id="password" name="password" type="password" required>
+            <input id="password" name="password" type="password" required placeholder="Your Meross password">
 
-            {% if error %}
-                <div class="error">{{ error }}</div>
-            {% endif %}
+            <div id="errorMessage" class="error"></div>
+            <div id="successMessage" class="success">✅ Account connected successfully! You can now control your Meross devices.</div>
 
-            <button type="submit">Save Credentials</button>
+            <button id="submitBtn" type="submit">
+                <span id="buttonText">Connect Account</span>
+                <span id="buttonSpinner" class="loading" style="display: none;"></span>
+            </button>
+            
+            <div class="info-box">
+                <strong>💡 Tip:</strong> Your credentials are stored securely in cookies and used only to control your devices.
+            </div>
         </form>
     </div>
+
+    <script>
+        // Get UID from URL parameter
+        const urlParams = new URLSearchParams(window.location.search);
+        const uid = urlParams.get('uid');
+        
+        if (uid) {
+            document.getElementById('uidInfo').textContent = `User ID: ${uid}`;
+            document.getElementById('uidInfo').style.display = 'block';
+        }
+
+        // Load saved email from cookie
+        function getCookie(name) {
+            const value = `; ${document.cookie}`;
+            const parts = value.split(`; ${name}=`);
+            if (parts.length === 2) return parts.pop().split(';').shift();
+            return null;
+        }
+
+        const savedEmail = getCookie('meross_email');
+        if (savedEmail) {
+            document.getElementById('email').value = decodeURIComponent(savedEmail);
+        }
+
+        // Form submission
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            const submitBtn = document.getElementById('submitBtn');
+            const buttonText = document.getElementById('buttonText');
+            const buttonSpinner = document.getElementById('buttonSpinner');
+            const errorDiv = document.getElementById('errorMessage');
+            const successDiv = document.getElementById('successMessage');
+
+            // Hide messages
+            errorDiv.classList.remove('show');
+            successDiv.classList.remove('show');
+
+            // Show loading
+            submitBtn.disabled = true;
+            buttonText.style.display = 'none';
+            buttonSpinner.style.display = 'inline-block';
+
+            try {
+                const response = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    credentials: 'include',
+                    body: JSON.stringify({
+                        email: email,
+                        password: password
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    // Save credentials to cookies
+                    const expiryDate = new Date();
+                    expiryDate.setTime(expiryDate.getTime() + (365 * 24 * 60 * 60 * 1000)); // 1 year
+                    
+                    document.cookie = `meross_email=${encodeURIComponent(email)}; expires=${expiryDate.toUTCString()}; path=/; SameSite=Lax`;
+                    document.cookie = `meross_password=${encodeURIComponent(password)}; expires=${expiryDate.toUTCString()}; path=/; SameSite=Lax`;
+                    
+                    if (uid) {
+                        document.cookie = `meross_uid=${uid}; expires=${expiryDate.toUTCString()}; path=/; SameSite=Lax`;
+                    }
+
+                    successDiv.classList.add('show');
+                    errorDiv.classList.remove('show');
+                    
+                    // Redirect to device selection after 2 seconds
+                    setTimeout(() => {
+                        window.location.href = '/devices';
+                    }, 2000);
+                } else {
+                    errorDiv.textContent = data.detail || 'Invalid credentials. Please try again.';
+                    errorDiv.classList.add('show');
+                    successDiv.classList.remove('show');
+                }
+            } catch (error) {
+                errorDiv.textContent = `Error: ${error.message}. Please try again.`;
+                errorDiv.classList.add('show');
+                successDiv.classList.remove('show');
+            } finally {
+                submitBtn.disabled = false;
+                buttonText.style.display = 'inline';
+                buttonSpinner.style.display = 'none';
+            }
+        });
+    </script>
 </body>
 </html>
