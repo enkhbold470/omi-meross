@@ -43,12 +43,26 @@ if os.getenv('HTTPS_PROXY'):
     os.environ['OPENAI_PROXY'] = os.getenv('HTTPS_PROXY')
 
 # Audio storage directory
-AUDIO_STORAGE_DIR = Path(os.environ.get("OMI_AUDIO_DIR", Path.cwd() / "voice_audio")).resolve()
+# On Vercel/serverless, default to /tmp (ephemeral storage)
+# On local/dev, use configured directory or default to voice_audio in current dir
+if os.path.exists("/tmp") and os.access("/tmp", os.W_OK):
+    default_storage = Path("/tmp") / "voice_audio"
+else:
+    default_storage = Path.cwd() / "voice_audio"
+
+AUDIO_STORAGE_DIR = Path(os.environ.get("OMI_AUDIO_DIR", str(default_storage))).resolve()
 try:
-    AUDIO_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-    logger.info(f"Audio storage directory ready at {AUDIO_STORAGE_DIR}")
+    # Only try to create directory if it's not /tmp (which always exists)
+    if str(AUDIO_STORAGE_DIR).startswith("/tmp"):
+        # Just ensure the subdirectory exists in /tmp
+        if AUDIO_STORAGE_DIR != Path("/tmp"):
+            AUDIO_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Audio storage directory ready at {AUDIO_STORAGE_DIR} (serverless)")
+    else:
+        AUDIO_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Audio storage directory ready at {AUDIO_STORAGE_DIR}")
 except Exception as exc:
-    logger.error(f"Failed to prepare audio storage directory {AUDIO_STORAGE_DIR}: {exc}")
+    logger.warning(f"Failed to prepare audio storage directory {AUDIO_STORAGE_DIR}: {exc}. Will use /tmp if available.")
 
 # Create router
 router = APIRouter(tags=["meross-device"])
@@ -521,7 +535,10 @@ def extract_text_from_segments(segments: List[OMISegment]) -> str:
     return " ".join(user_segments).strip()
 
 
-
+@router.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    # /vercel.svg is automatically served when included in the public/** directory.
+    return RedirectResponse("/vercel.svg", status_code=307)
 
 # API Routes
 @router.get("/devices", response_class=HTMLResponse)
