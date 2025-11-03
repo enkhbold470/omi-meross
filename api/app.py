@@ -295,7 +295,7 @@ async def get_device(email: str, password: str, device_uuid: Optional[str] = Non
             raise HTTPException(status_code=404, detail=f"Device {device_uuid} not found")
     else:
         # Use first device as default
-        device = all_devices[0]
+        device = all_devices[1]
     
     logger.debug(f"Selected device {device.uuid} ({device.name})")
     await device.async_update()
